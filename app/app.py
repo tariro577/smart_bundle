@@ -8,6 +8,7 @@ import streamlit as st
 from pathlib import Path
 import sys
 
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(BASE_DIR / "src"))
 
@@ -16,6 +17,7 @@ from features import add_features, model_features
 MODEL_PATH = BASE_DIR / "models" / "bundle_model.pkl"
 STATS_PATH = BASE_DIR / "models" / "training_stats.json"
 DATA_PATH = BASE_DIR / "data" / "telecom_churn.csv"
+
 
 BUNDLE_CATALOG = {
     "Starter Lite": {
@@ -50,44 +52,100 @@ BUNDLE_CATALOG = {
     },
 }
 
-st.set_page_config(page_title="Smart Bundle Recommendation", layout="centered")
+st.set_page_config(page_title="Smart Bundle Recommendation", layout="wide", page_icon="📶")
 
-st.title("Smart Bundle Recommendation")
-st.write("Enter a customer's recent usage to get bundle suggestions.")
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    .bundle-card {
+        background: #ffffff;
+        border: 1px solid #e7e7ea;
+        border-radius: 14px;
+        padding: 1.1rem 1.2rem;
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+        margin-bottom: 1rem;
+    }
+    .bundle-title {
+        font-size: 1.1rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+    .muted {
+        color: #6b7280;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+header_left, header_right = st.columns([0.7, 0.3])
+with header_left:
+    st.title("Smart Bundle Recommendation")
+    st.write("Enter customer usage to generate a clean, ranked bundle recommendation.")
+with header_right:
+    st.caption("Model-driven clustering · Telecom bundles")
 
 if not MODEL_PATH.exists():
     st.warning(
         "Model not found. Train it first by running `python src/train.py --data data/telecom_churn.csv`."
     )
 
-st.subheader("Lookup Mode")
-st.caption("Search for an existing customer by phone number, or switch to manual input.")
+st.sidebar.header("Customer Inputs")
+st.sidebar.caption("Search a customer or enter new usage values.")
 
-mode = st.radio("Choose input method", ["Phone number lookup", "Manual entry"], horizontal=True)
+mode = st.sidebar.radio("Input method", ["Phone number lookup", "Manual entry"], horizontal=False)
 
 prefill = None
 if mode == "Phone number lookup":
-    phone_number = st.text_input("Phone number from dataset", placeholder="e.g., 415-555-1234")
-    if phone_number and DATA_PATH.exists():
-        df_data = pd.read_csv(DATA_PATH)
+    @st.cache_data(show_spinner=False)
+    def load_phone_numbers(data_path: Path) -> tuple[pd.DataFrame, str, list[str]]:
+        df_data = pd.read_csv(data_path)
         df_data.columns = [c.strip() for c in df_data.columns]
         phone_col = "phone number" if "phone number" in df_data.columns else "Phone number"
+        numbers = []
         if phone_col in df_data.columns:
-            match = df_data[df_data[phone_col].astype(str).str.strip() == phone_number.strip()]
-            if match.empty:
-                st.info("Phone number not found. You can use manual entry below.")
-            else:
-                prefill = match.iloc[0]
-                st.success("Phone number found. Usage fields auto-filled.")
+            numbers = (
+                df_data[phone_col]
+                .astype(str)
+                .str.strip()
+                .dropna()
+                .unique()
+                .tolist()
+            )
+        return df_data, phone_col, sorted(numbers)
+
+    phone_number = st.sidebar.text_input("Phone number from dataset", placeholder="e.g., 415-555-1234")
+    selected_number = None
+    if DATA_PATH.exists():
+        df_data, phone_col, numbers = load_phone_numbers(DATA_PATH)
+        if numbers:
+            selected_number = st.sidebar.selectbox(
+                "Or pick from list",
+                options=[""] + numbers,
+                format_func=lambda x: x or "Select a phone number",
+            )
+        if phone_col not in df_data.columns:
+            st.sidebar.warning("Phone number column not found in dataset.")
+    else:
+        df_data = None
+        phone_col = ""
+        st.sidebar.warning("Dataset not found. Please add telecom_churn.csv to /data.")
+
+    chosen_number = selected_number or phone_number
+    if chosen_number and DATA_PATH.exists() and df_data is not None:
+        match = df_data[df_data[phone_col].astype(str).str.strip() == chosen_number.strip()]
+        if match.empty:
+            st.sidebar.info("Phone number not found. You can use manual entry below.")
         else:
-            st.warning("Phone number column not found in dataset.")
+            prefill = match.iloc[0]
+            st.sidebar.success("Phone number found. Usage auto-filled.")
 
-st.subheader("What-if Sliders")
-st.caption("Adjust the sliders to see how recommendations shift in real time.")
-
-col1, col2 = st.columns(2)
-
-with col1:
+with st.sidebar.form("usage_form"):
+    st.subheader("Usage sliders")
     account_length = st.slider(
         "Account length (days)", 1, 365, int(prefill["account length"]) if prefill is not None else 120, 1
     )
@@ -106,8 +164,6 @@ with col1:
     night_minutes = st.slider(
         "Total night minutes", 0.0, 350.0, float(prefill["total night minutes"]) if prefill is not None else 200.0, 1.0
     )
-
-with col2:
     night_calls = st.slider(
         "Total night calls", 0, 200, int(prefill["total night calls"]) if prefill is not None else 90, 1
     )
@@ -123,14 +179,14 @@ with col2:
     service_calls = st.slider(
         "Customer service calls", 0, 10, int(prefill["customer service calls"]) if prefill is not None else 1, 1
     )
+    st.subheader("Plan options")
     intl_plan = st.selectbox(
         "International plan", ["No", "Yes"], index=1 if prefill is not None and str(prefill["international plan"]).lower() == "yes" else 0
     )
     vmail_plan = st.selectbox(
         "Voice mail plan", ["No", "Yes"], index=1 if prefill is not None and str(prefill["voice mail plan"]).lower() == "yes" else 0
     )
-
-submitted = True
+    submitted = st.form_submit_button("Generate recommendations")
 
 def format_percentile(value: float, ref: dict[str, float]) -> str:
     if value >= ref.get("0.9", float("inf")):
@@ -167,6 +223,9 @@ def build_explanation(row: pd.Series, stats: dict) -> list[str]:
         reasons.append("Model explanation uses usage totals and international activity.")
     return reasons
 
+
+if not submitted:
+    st.info("Use the sidebar to enter usage details, then click **Generate recommendations**.")
 
 if submitted and MODEL_PATH.exists():
     row = {
@@ -239,27 +298,42 @@ if submitted and MODEL_PATH.exists():
     top_clusters = ranked_clusters[:3]
     other_clusters = ranked_clusters[3:]
 
+    kpi_1, kpi_2, kpi_3, kpi_4 = st.columns(4)
+    kpi_1.metric("Total minutes", f"{df['Total minutes'].iloc[0]:.0f} mins")
+    kpi_2.metric("Data proxy", f"{df['Data proxy'].iloc[0]:.0f} mins")
+    kpi_3.metric("Intl ratio", f"{df['Intl usage ratio'].iloc[0]:.1%}")
+    kpi_4.metric("Support calls / month", f"{df['Support calls per month'].iloc[0]:.2f}")
+
     st.subheader("Top 3 Recommendations")
-    for cluster_id, dist in top_clusters:
+    card_cols = st.columns(3)
+    for (cluster_id, dist), col in zip(top_clusters, card_cols):
         label = bundle_map.get(cluster_id, f"Cluster {cluster_id}")
         bundle = BUNDLE_CATALOG.get(label, {})
         score = similarity(dist)
-        st.markdown(f"**{label}** — {score:.0%} match")
-        st.write(f"Voice: {bundle.get('voice', '—')} | Data: {bundle.get('data', '—')}")
-        st.caption(bundle.get("message", ""))
         profile = cluster_profiles.get(str(cluster_id)) or cluster_profiles.get(cluster_id)
-        for reason in bundle_explanation(profile, df.iloc[0]):
-            st.write(f"- {reason}")
+        reasons = bundle_explanation(profile, df.iloc[0])
+        reasons_html = "".join(f"<li>{reason}</li>" for reason in reasons)
+        card_html = f"""
+        <div class="bundle-card">
+            <div class="bundle-title">{label}</div>
+            <div class="muted">{score:.0%} match · Voice: {bundle.get('voice', '—')} · Data: {bundle.get('data', '—')}</div>
+            <p>{bundle.get('message', '')}</p>
+            <ul>{reasons_html}</ul>
+        </div>
+        """
+        with col:
+            st.markdown(card_html, unsafe_allow_html=True)
 
     with st.expander("Other Bundles (ranked)"):
         for cluster_id, dist in other_clusters:
             label = bundle_map.get(cluster_id, f"Cluster {cluster_id}")
             bundle = BUNDLE_CATALOG.get(label, {})
             score = similarity(dist)
+            profile = cluster_profiles.get(str(cluster_id)) or cluster_profiles.get(cluster_id)
+            reasons = bundle_explanation(profile, df.iloc[0])
             st.markdown(f"**{label}** — {score:.0%} match")
             st.write(f"Voice: {bundle.get('voice', '—')} | Data: {bundle.get('data', '—')}")
-            profile = cluster_profiles.get(str(cluster_id)) or cluster_profiles.get(cluster_id)
-            for reason in bundle_explanation(profile, df.iloc[0]):
+            for reason in reasons:
                 st.write(f"- {reason}")
 
     st.divider()
